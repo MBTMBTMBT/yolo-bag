@@ -1,1 +1,7 @@
-/dataset/*
+# raw data
+dataset/
+backgrounds/
+bg_dir/
+
+# generated / processed data
+processed_dataset/

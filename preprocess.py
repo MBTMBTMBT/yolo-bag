@@ -1,28 +1,18 @@
 #!/usr/bin/env python3
 """
-Consolidate multiple Ultralytics-style (.yolov11) exports that each
-already contain train/valid(/test) splits into a single dataset folder
-plus a compatible dataset.yaml.
+Merge multiple Ultralytics (.yolov11) exports into one dataset.
+Any `test/` split that exists inside an export is appended to `valid/`
+so the final structure only has `train/` and `valid/`.
 
-Layout expected under <root_path> (any number of .yolov11 exports):
+Source layout under <root_path> (one or more exports):
 
     paper bag.v1i.yolov11/
-    ├─ train/
-    │   ├─ images/
-    │   └─ labels/
-    ├─ valid/
-    │   ├─ images/
-    │   └─ labels/
-    └─ test/            # optional
-        ├─ images/
-        └─ labels/
-
-The script **does not reshuffle**; it simply merges everything that
-already exists.
+    ├─ train/images, train/labels
+    ├─ valid/images, valid/labels
+    └─ test/images,  test/labels   # optional, will be merged into valid/
 """
 
 import argparse
-import glob
 import os
 import shutil
 from tqdm import tqdm
@@ -32,110 +22,106 @@ import yaml
 # Globals
 # ---------------------------------------------------------------------
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".webp"}
-SPLITS = ["train", "valid", "test"]  # test is optional
+SPLITS = ["train", "valid", "test"]            # we still recognise "test"
 
 
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
-def collect_image_label_pairs(dataset_root):
+def collect_pairs(dataset_root):
     """
-    Return a dict {split: [(img_path, label_path), ...]}.
-    Any split (train/valid/test) that isn't present remains an empty list.
+    Return a dict:  {split: [(img, lbl), ...]}.
     """
-    pairs_by_split = {s: [] for s in SPLITS}
+    split_pairs = {s: [] for s in SPLITS}
 
     for export in os.listdir(dataset_root):
-        export_dir = os.path.join(dataset_root, export)
-        if not os.path.isdir(export_dir):
+        exp_dir = os.path.join(dataset_root, export)
+        if not os.path.isdir(exp_dir):
             continue
 
         for split in SPLITS:
-            img_dir = os.path.join(export_dir, split, "images")
-            lbl_dir = os.path.join(export_dir, split, "labels")
+            img_dir = os.path.join(exp_dir, split, "images")
+            lbl_dir = os.path.join(exp_dir, split, "labels")
             if not (os.path.isdir(img_dir) and os.path.isdir(lbl_dir)):
-                continue  # split not present in this export
+                continue
 
-            for file in os.listdir(img_dir):
-                if os.path.splitext(file)[1].lower() not in IMAGE_EXTENSIONS:
+            for fname in os.listdir(img_dir):
+                if os.path.splitext(fname)[1].lower() not in IMAGE_EXTENSIONS:
                     continue
-                img_path = os.path.join(img_dir, file)
-                label_path = os.path.join(
-                    lbl_dir, os.path.splitext(file)[0] + ".txt"
-                )
-                if os.path.exists(label_path):
-                    pairs_by_split[split].append((img_path, label_path))
+                img_path = os.path.join(img_dir, fname)
+                lbl_path = os.path.join(lbl_dir,
+                                        os.path.splitext(fname)[0] + ".txt")
+                if os.path.exists(lbl_path):
+                    split_pairs[split].append((img_path, lbl_path))
 
-    return pairs_by_split
+    return split_pairs
 
 
-def copy_dataset(pairs, out_dir):
+def copy_pairs(pairs, out_split_dir):
     if not pairs:
         return
-    os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
-    os.makedirs(os.path.join(out_dir, "labels"), exist_ok=True)
+    img_out = os.path.join(out_split_dir, "images")
+    lbl_out = os.path.join(out_split_dir, "labels")
+    os.makedirs(img_out, exist_ok=True)
+    os.makedirs(lbl_out, exist_ok=True)
 
-    for img_path, lbl_path in tqdm(
-        pairs, desc=f"Copy → {os.path.basename(out_dir)}", ncols=80
-    ):
-        shutil.copy(img_path, os.path.join(out_dir, "images", os.path.basename(img_path)))
-        shutil.copy(lbl_path, os.path.join(out_dir, "labels", os.path.basename(lbl_path)))
+    for img, lbl in tqdm(pairs, desc=f"Copy → {os.path.basename(out_split_dir)}",
+                         ncols=80):
+        shutil.copy(img, os.path.join(img_out, os.path.basename(img)))
+        shutil.copy(lbl, os.path.join(lbl_out, os.path.basename(lbl)))
 
 
-def find_max_class_id(pairs):
-    max_id = -1
-    for _, lbl_path in pairs:
-        with open(lbl_path, "r") as f:
+def max_class_id(all_pairs):
+    m = -1
+    for _, lbl in all_pairs:
+        with open(lbl, "r") as f:
             for line in f:
-                if not line.strip():
-                    continue
-                cid = int(line.split()[0])
-                if cid > max_id:
-                    max_id = cid
-    return max_id
+                if line.strip():
+                    cid = int(line.split()[0])
+                    m = max(m, cid)
+    return m
 
 
-def export_yaml(save_dir, nc, splits_present):
-    data = {"nc": nc, "names": [str(i) for i in range(nc)]}
-
-    if "train" in splits_present:
-        data["train"] = os.path.abspath(os.path.join(save_dir, "train", "images"))
-    if "valid" in splits_present:
-        data["val"] = os.path.abspath(os.path.join(save_dir, "valid", "images"))
-    if "test" in splits_present:
-        data["test"] = os.path.abspath(os.path.join(save_dir, "test", "images"))
-
+def write_yaml(save_dir, nc):
+    data = {
+        "train": os.path.abspath(os.path.join(save_dir, "train", "images")),
+        "val":   os.path.abspath(os.path.join(save_dir, "valid", "images")),
+        "nc": nc,
+        "names": [str(i) for i in range(nc)]
+    }
     yaml_path = os.path.join(save_dir, "dataset.yaml")
     with open(yaml_path, "w") as f:
-        yaml.dump(data, f)
-    print(f"[✔] Exported Ultralytics YAML → {yaml_path}")
+        yaml.safe_dump(data, f)
+    print(f"[✔] Wrote YAML → {yaml_path}")
 
 
 # ---------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------
 def main(args):
-    dataset_root = args.root_path  # *direct* path to the exports folder
-    output_root = args.output_path
+    dataset_root = args.root_path
+    out_root     = args.output_path
 
-    print(f"[INFO] Scanning: {dataset_root}")
-    pairs_by_split = collect_image_label_pairs(dataset_root)
+    print(f"[INFO] Scanning {dataset_root}")
+    pairs = collect_pairs(dataset_root)
 
-    # copy each split that actually exists
-    for split, pairs in pairs_by_split.items():
-        if not pairs:
-            continue
-        print(f"[INFO] {split.capitalize():5}: {len(pairs)} pairs")
-        copy_dataset(pairs, os.path.join(output_root, split))
+    # merge test into valid
+    pairs["valid"].extend(pairs["test"])
+    del pairs["test"]
 
-    all_pairs = [p for plist in pairs_by_split.values() for p in plist]
+    # copy train & valid
+    for split in ["train", "valid"]:
+        copy_pairs(pairs[split], os.path.join(out_root, split))
+        print(f"[INFO] {split.capitalize():5}: {len(pairs[split])} pairs")
+
+    all_pairs = pairs["train"] + pairs["valid"]
     if not all_pairs:
-        raise RuntimeError("No image/label pairs found. Check directory layout.")
+        raise RuntimeError("No images/labels found – check directory layout.")
 
-    nc = find_max_class_id(all_pairs) + 1
-    export_yaml(output_root, nc, [s for s, p in pairs_by_split.items() if p])
+    nc = max_class_id(all_pairs) + 1
+    write_yaml(out_root, nc)
 
-    print(f"[✔] Dataset consolidation complete → {output_root}")
+    print(f"[✔] Dataset ready at {out_root}")
 
 
 # ---------------------------------------------------------------------
@@ -143,19 +129,17 @@ def main(args):
 # ---------------------------------------------------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Consolidate YOLOv11 exports with existing train/valid(/test) splits."
+        description="Merge YOLOv11 exports; fold test/ into valid/."
     )
     parser.add_argument(
         "root_path",
-        type=str,
-        help="Directory containing one or more '*.yolov11' export folders",
+        nargs="?",
+        default=".",
+        help="Folder containing *.yolov11 exports (default: current dir)",
     )
     parser.add_argument(
         "--output_path",
-        type=str,
         default="processed_dataset",
-        help="Destination folder for the unified dataset",
+        help="Destination folder for merged dataset",
     )
-
-    args = parser.parse_args()
-    main(args)
+    main(parser.parse_args())
