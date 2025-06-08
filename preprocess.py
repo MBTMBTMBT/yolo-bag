@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Merge multiple Ultralytics (.yolov11) exports into one dataset.
+Merge multiple Ultralytics (.yolov11) exports into one raw_dataset.
 Any `test/` split that exists inside an export is appended to `valid/`
 so the final structure only has `train/` and `valid/`.
 
@@ -22,7 +22,7 @@ import yaml
 # Globals
 # ---------------------------------------------------------------------
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".webp"}
-SPLITS = ["train", "valid", "test"]            # we still recognise "test"
+SPLITS = ["train", "valid", "test"]  # we still recognise "test"
 
 
 # ---------------------------------------------------------------------
@@ -49,8 +49,7 @@ def collect_pairs(dataset_root):
                 if os.path.splitext(fname)[1].lower() not in IMAGE_EXTENSIONS:
                     continue
                 img_path = os.path.join(img_dir, fname)
-                lbl_path = os.path.join(lbl_dir,
-                                        os.path.splitext(fname)[0] + ".txt")
+                lbl_path = os.path.join(lbl_dir, os.path.splitext(fname)[0] + ".txt")
                 if os.path.exists(lbl_path):
                     split_pairs[split].append((img_path, lbl_path))
 
@@ -65,8 +64,9 @@ def copy_pairs(pairs, out_split_dir):
     os.makedirs(img_out, exist_ok=True)
     os.makedirs(lbl_out, exist_ok=True)
 
-    for img, lbl in tqdm(pairs, desc=f"Copy → {os.path.basename(out_split_dir)}",
-                         ncols=80):
+    for img, lbl in tqdm(
+        pairs, desc=f"Copy → {os.path.basename(out_split_dir)}", ncols=80
+    ):
         shutil.copy(img, os.path.join(img_out, os.path.basename(img)))
         shutil.copy(lbl, os.path.join(lbl_out, os.path.basename(lbl)))
 
@@ -85,11 +85,11 @@ def max_class_id(all_pairs):
 def write_yaml(save_dir, nc):
     data = {
         "train": os.path.abspath(os.path.join(save_dir, "train", "images")),
-        "val":   os.path.abspath(os.path.join(save_dir, "valid", "images")),
+        "val": os.path.abspath(os.path.join(save_dir, "valid", "images")),
         "nc": nc,
-        "names": [str(i) for i in range(nc)]
+        "names": [str(i) for i in range(nc)],
     }
-    yaml_path = os.path.join(save_dir, "dataset.yaml")
+    yaml_path = os.path.join(save_dir, "raw_dataset.yaml")
     with open(yaml_path, "w") as f:
         yaml.safe_dump(data, f)
     print(f"[✔] Wrote YAML → {yaml_path}")
@@ -100,7 +100,7 @@ def write_yaml(save_dir, nc):
 # ---------------------------------------------------------------------
 def main(args):
     dataset_root = args.root_path
-    out_root     = args.output_path
+    out_root = args.output_path
 
     print(f"[INFO] Scanning {dataset_root}")
     pairs = collect_pairs(dataset_root)
@@ -140,6 +140,6 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_path",
         default="processed_dataset",
-        help="Destination folder for merged dataset",
+        help="Destination folder for merged raw_dataset",
     )
     main(parser.parse_args())

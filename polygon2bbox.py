@@ -2,6 +2,7 @@ import os
 import glob
 import argparse
 
+
 def convert_polygon_to_bbox(polygon_coords):
     """
     Convert polygon points to YOLO-format bbox (x_center, y_center, w, h)
@@ -23,6 +24,7 @@ def convert_polygon_to_bbox(polygon_coords):
     height = y_max - y_min
 
     return x_center, y_center, width, height
+
 
 def convert_mask_txt_to_yolo_bbox(input_dir, output_dir):
     os.makedirs(output_dir, exist_ok=True)
@@ -48,7 +50,9 @@ def convert_mask_txt_to_yolo_bbox(input_dir, output_dir):
                 continue  # skip malformed polygon
 
             x_center, y_center, width, height = convert_polygon_to_bbox(coords)
-            converted_line = f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+            converted_line = (
+                f"{class_id} {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+            )
             converted_lines.append(converted_line)
 
         output_path = os.path.join(output_dir, os.path.basename(txt_file))
@@ -58,10 +62,17 @@ def convert_mask_txt_to_yolo_bbox(input_dir, output_dir):
 
     print(f"[✔] Converted {len(txt_files)} files to YOLO bbox format in '{output_dir}'")
 
+
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Convert polygon-format YOLO masks to YOLO bbox format")
-    parser.add_argument("input_dir", type=str, help="Input folder containing polygon .txt files")
-    parser.add_argument("output_dir", type=str, help="Output folder to save bbox .txt files")
+    parser = argparse.ArgumentParser(
+        description="Convert polygon-format YOLO masks to YOLO bbox format"
+    )
+    parser.add_argument(
+        "input_dir", type=str, help="Input folder containing polygon .txt files"
+    )
+    parser.add_argument(
+        "output_dir", type=str, help="Output folder to save bbox .txt files"
+    )
     args = parser.parse_args()
 
     convert_mask_txt_to_yolo_bbox(args.input_dir, args.output_dir)

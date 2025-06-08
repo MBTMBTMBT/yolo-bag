@@ -13,7 +13,7 @@ def process_txt_file(file_path):
     """
     try:
         # Read the original content
-        with open(file_path, 'r', encoding='utf-8') as file:
+        with open(file_path, "r", encoding="utf-8") as file:
             lines = file.readlines()
 
         # Process each line
@@ -23,18 +23,20 @@ def process_txt_file(file_path):
             if line:  # Skip empty lines
                 # Split the line by spaces
                 parts = line.split()
-                if len(parts) >= 5:  # Ensure we have at least 5 parts (label + 4 coordinates)
+                if (
+                    len(parts) >= 5
+                ):  # Ensure we have at least 5 parts (label + 4 coordinates)
                     # Replace the first element (label) with '0' and keep the rest
-                    parts[0] = '0'
-                    processed_lines.append(' '.join(parts) + '\n')
+                    parts[0] = "0"
+                    processed_lines.append(" ".join(parts) + "\n")
                 else:
                     # If line doesn't have expected format, keep it as is
-                    processed_lines.append(line + '\n')
+                    processed_lines.append(line + "\n")
             else:
-                processed_lines.append('\n')
+                processed_lines.append("\n")
 
         # Write back to the same file
-        with open(file_path, 'w', encoding='utf-8') as file:
+        with open(file_path, "w", encoding="utf-8") as file:
             file.writelines(processed_lines)
 
         print(f"Successfully processed: {file_path}")
@@ -59,7 +61,7 @@ def process_folder(folder_path):
         return
 
     # Find all txt files in the folder
-    txt_files = [f for f in os.listdir(folder_path) if f.lower().endswith('.txt')]
+    txt_files = [f for f in os.listdir(folder_path) if f.lower().endswith(".txt")]
 
     if not txt_files:
         print(f"No txt files found in folder: {folder_path}")
@@ -83,9 +85,9 @@ def main():
         description="Convert all label numbers in txt files to 0 while keeping other data unchanged."
     )
     parser.add_argument(
-        'folder_path',
+        "folder_path",
         type=str,
-        help='Path to the folder containing txt files to process'
+        help="Path to the folder containing txt files to process",
     )
 
     args = parser.parse_args()

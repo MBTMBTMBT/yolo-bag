@@ -37,7 +37,6 @@ opencv-python-headless==4.11.0.86
 packaging==25.0
 pandas==2.0.3
 pillow==10.4.0
-pkg_resources==0.0.0
 psutil==7.0.0
 py-cpuinfo==9.0.0
 pydantic==2.10.6
