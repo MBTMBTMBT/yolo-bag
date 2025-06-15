@@ -43,10 +43,8 @@ class YOLODataAugmentation:
                 p=0.8
             ),
 
-            # Resize with aspect ratio preservation
-            A.LongestMaxSize(max_size=640, p=0.3),
-            A.PadIfNeeded(min_height=640, min_width=640,
-                          border_mode=cv2.BORDER_CONSTANT, value=0, p=0.3),
+            # Force resize to exact 480x640 resolution
+            A.Resize(height=480, width=640, p=1.0),  # Always resize to exact dimensions
 
             # Color and brightness adjustments
             A.RandomBrightnessContrast(
