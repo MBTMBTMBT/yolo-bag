@@ -5,10 +5,11 @@ import random
 import argparse
 from pathlib import Path
 import shutil
-from typing import List, Tuple
+from typing import List, Tuple, Dict, Optional
 import albumentations as A
 from albumentations.core.transforms_interface import ImageOnlyTransform
 from tqdm import tqdm
+import yaml
 
 
 class YOLODataAugmentation:
@@ -27,6 +28,9 @@ class YOLODataAugmentation:
         """
         self.output_dir = Path(output_dir)
         self.augment_count = augment_count
+        self.class_names = {}
+        self.yaml_metadata = {}
+        self.has_existing_yaml = False
 
         # Create output directory structure
         self.setup_output_dirs()
@@ -85,6 +89,180 @@ class YOLODataAugmentation:
             label_fields=['class_labels'],
             min_visibility=0.3  # Keep boxes with at least 30% visibility
         ))
+
+    def find_and_read_yaml_file(self, input_dir: str) -> bool:
+        """
+        Find and read existing data.yaml file from input directory.
+        Returns True if YAML was found and read successfully.
+
+        Args:
+            input_dir: Path to input dataset directory
+
+        Returns:
+            bool: True if existing YAML was found and loaded
+        """
+        input_path = Path(input_dir)
+
+        print("Searching for existing data.yaml file...")
+
+        # Look for YAML files in the input directory
+        yaml_candidates = ["data.yaml", "dataset.yaml", "config.yaml"]
+        yaml_path = None
+
+        for yaml_name in yaml_candidates:
+            candidate_path = input_path / yaml_name
+            if candidate_path.exists():
+                yaml_path = candidate_path
+                break
+
+        if yaml_path:
+            try:
+                with open(yaml_path, 'r', encoding='utf-8') as f:
+                    yaml_data = yaml.safe_load(f)
+
+                print(f"Found and reading existing YAML: {yaml_path.name}")
+
+                # Extract class names if available
+                if 'names' in yaml_data:
+                    names = yaml_data['names']
+                    if isinstance(names, list):
+                        # Convert list to dict with indices
+                        for idx, name in enumerate(names):
+                            self.class_names[idx] = name
+                    elif isinstance(names, dict):
+                        # Use dict-style names directly
+                        for idx, name in names.items():
+                            self.class_names[int(idx)] = name
+
+                # Store other metadata
+                for key in ['nc', 'path', 'description']:
+                    if key in yaml_data:
+                        self.yaml_metadata[key] = yaml_data[key]
+
+                print(f"Loaded {len(self.class_names)} class names from existing YAML")
+                self.has_existing_yaml = True
+                return True
+
+            except Exception as e:
+                print(f"Warning: Error reading {yaml_path}: {e}")
+
+        print("No existing YAML file found, will generate default class names")
+        return False
+
+    def generate_default_class_names(self, nc: int) -> Dict[int, str]:
+        """
+        Generate default class names when no YAML file is found.
+
+        Args:
+            nc: Number of classes
+
+        Returns:
+            Dict mapping class indices to default names
+        """
+        print("Generating default class names...")
+        return {i: f"class_{i}" for i in range(nc)}
+
+    def max_class_id(self, input_dir: str) -> int:
+        """
+        Find the maximum class ID across all label files in the dataset.
+
+        Args:
+            input_dir: Path to input dataset directory
+
+        Returns:
+            Maximum class ID found
+        """
+        input_path = Path(input_dir)
+        max_id = -1
+
+        for split in ['train', 'valid']:
+            split_path = input_path / split
+            if not split_path.exists():
+                continue
+
+            labels_dir = split_path / 'labels'
+            if not labels_dir.exists():
+                continue
+
+            # Check all label files in this split
+            for label_file in labels_dir.glob('*.txt'):
+                try:
+                    with open(label_file, 'r') as f:
+                        for line in f:
+                            line = line.strip()
+                            if line:
+                                class_id = int(line.split()[0])
+                                max_id = max(max_id, class_id)
+                except (ValueError, IndexError, IOError) as e:
+                    print(f"Warning: Error reading {label_file}: {e}")
+                    continue
+
+        return max_id
+
+    def write_yaml_config(self, nc: int):
+        """
+        Write the dataset configuration YAML file.
+
+        Args:
+            nc: Number of classes detected in the dataset
+        """
+        # Determine class names strategy
+        if self.class_names and self.has_existing_yaml:
+            print("Using class names from existing YAML file")
+            # Use existing class names, fill missing indices with defaults
+            names = {}
+            for i in range(nc):
+                if i in self.class_names:
+                    names[i] = self.class_names[i]
+                else:
+                    names[i] = f"class_{i}"  # Default for missing classes
+                    print(f"Generated default name for missing class {i}: class_{i}")
+        else:
+            print("No existing YAML found, generating default class names")
+            # Generate all default class names
+            names = self.generate_default_class_names(nc)
+
+        # Build the YAML data structure
+        data = {
+            "path": str(self.output_dir.absolute()),  # Root directory
+            "train": os.path.join("train", "images"),  # Relative to path
+            "val": os.path.join("valid", "images"),  # Relative to path
+            "nc": nc,
+            "names": names,
+        }
+
+        # Add metadata if available
+        if self.yaml_metadata:
+            if 'description' in self.yaml_metadata:
+                data['description'] = self.yaml_metadata['description']
+            else:
+                data['description'] = 'Augmented dataset from YOLO data augmentation pipeline'
+        else:
+            data['description'] = 'Augmented dataset from YOLO data augmentation pipeline'
+
+        # Add creation info
+        data['created_by'] = 'YOLO Data Augmentation Pipeline'
+
+        # Write main YAML file
+        yaml_path = self.output_dir / "data.yaml"
+        with open(yaml_path, "w", encoding='utf-8') as f:
+            yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+        print(f"Wrote YAML config → {yaml_path}")
+
+        # Also write a legacy format for backward compatibility
+        legacy_data = {
+            "train": str((self.output_dir / "train" / "images").absolute()),
+            "val": str((self.output_dir / "valid" / "images").absolute()),
+            "nc": nc,
+            "names": list(names.values()),  # Convert to list format
+        }
+
+        legacy_yaml_path = self.output_dir / "augmented_dataset.yaml"
+        with open(legacy_yaml_path, "w", encoding='utf-8') as f:
+            yaml.safe_dump(legacy_data, f, default_flow_style=False, allow_unicode=True)
+
+        print(f"Wrote legacy YAML → {legacy_yaml_path}")
 
     def setup_output_dirs(self):
         """Create output directory structure"""
@@ -216,6 +394,9 @@ class YOLODataAugmentation:
         """
         input_path = Path(input_dir)
 
+        # Try to read existing YAML configuration first
+        self.find_and_read_yaml_file(input_dir)
+
         # Calculate total operations for progress tracking
         total_operations = self.get_total_operations(input_dir)
 
@@ -262,6 +443,24 @@ class YOLODataAugmentation:
 
                 # Update description after completing each split
                 pbar.set_description(f"Completed {split} split")
+
+        # Calculate number of classes and write YAML config
+        nc = self.max_class_id(input_dir) + 1
+
+        # Validate class names coverage if we have existing YAML
+        if self.has_existing_yaml and self.class_names:
+            missing_classes = set(range(nc)) - set(self.class_names.keys())
+            if missing_classes:
+                print(f"Warning: Missing class names for IDs: {sorted(missing_classes)}")
+                print("Will generate default names for missing classes")
+
+        self.write_yaml_config(nc)
+
+        print(f"\nTotal classes detected: {nc}")
+        if self.has_existing_yaml:
+            print("Used existing YAML configuration from source dataset")
+        else:
+            print("Generated default class names (no existing YAML found)")
 
     def copy_original(self, img_path: Path, labels_dir: Path, split: str):
         """Copy original image and label to output directory"""

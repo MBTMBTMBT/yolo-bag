@@ -1,4 +1,4 @@
-# !/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Merge multiple Ultralytics (.yolov11) exports into one raw_dataset.
 Collect all data from various split names (train/val/valid/validation/eval/test)
@@ -8,9 +8,10 @@ Source layout under <root_path> (one or more exports):
 
     paper bag.v1i.yolov11/
     ├─ train/images, train/labels
-    ├─ valid/images, valid/labels  
+    ├─ valid/images, valid/labels
     ├─ test/images,  test/labels
-    └─ validation/images, validation/labels  # any combination possible
+    ├─ validation/images, validation/labels  # any combination possible
+    └─ data.yaml  # YAML configuration file (optional)
 """
 
 import argparse
@@ -31,6 +32,73 @@ SPLIT_VARIANTS = ["train", "training", "val", "valid", "validation", "eval", "ev
 # ---------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------
+def find_and_read_yaml_files(dataset_root):
+    """
+    Find and read all data.yaml files in the dataset exports.
+    Returns merged class names and metadata, prioritizing existing YAML files.
+    """
+    all_class_names = {}
+    yaml_metadata = {}
+    yaml_files_found = []
+
+    print("[INFO] Searching for existing data.yaml files...")
+
+    for export in os.listdir(dataset_root):
+        exp_dir = os.path.join(dataset_root, export)
+        if not os.path.isdir(exp_dir):
+            continue
+
+        # Look for data.yaml or dataset.yaml files
+        yaml_candidates = ["data.yaml", "dataset.yaml", "config.yaml"]
+        yaml_path = None
+
+        for yaml_name in yaml_candidates:
+            candidate_path = os.path.join(exp_dir, yaml_name)
+            if os.path.exists(candidate_path):
+                yaml_path = candidate_path
+                break
+
+        if yaml_path:
+            try:
+                with open(yaml_path, 'r', encoding='utf-8') as f:
+                    yaml_data = yaml.safe_load(f)
+
+                yaml_files_found.append(f"{export}/{os.path.basename(yaml_path)}")
+                print(f"[INFO] Reading existing YAML: {export}/{os.path.basename(yaml_path)}")
+
+                # Extract class names if available
+                if 'names' in yaml_data:
+                    names = yaml_data['names']
+                    if isinstance(names, list):
+                        # Convert list to dict with indices
+                        for idx, name in enumerate(names):
+                            if idx not in all_class_names:  # Don't overwrite existing names
+                                all_class_names[idx] = name
+                    elif isinstance(names, dict):
+                        # Merge dict-style names
+                        for idx, name in names.items():
+                            key = int(idx)
+                            if key not in all_class_names:  # Don't overwrite existing names
+                                all_class_names[key] = name
+
+                # Store other metadata from first YAML file
+                if not yaml_metadata:
+                    for key in ['nc', 'path', 'description']:
+                        if key in yaml_data:
+                            yaml_metadata[key] = yaml_data[key]
+
+            except Exception as e:
+                print(f"[WARNING] Error reading {yaml_path}: {e}")
+
+    if yaml_files_found:
+        print(f"[INFO] Successfully read {len(yaml_files_found)} YAML files")
+        print(f"[INFO] Found {len(all_class_names)} class definitions")
+    else:
+        print("[INFO] No existing YAML files found, will generate default class names")
+
+    return all_class_names, yaml_metadata, len(yaml_files_found) > 0
+
+
 def collect_all_pairs(dataset_root):
     """
     Collect all image-label pairs from all possible split directories.
@@ -149,20 +217,82 @@ def max_class_id(all_pairs):
     return max_id
 
 
-def write_yaml(save_dir, nc):
+def generate_default_class_names(nc):
+    """
+    Generate default class names when no YAML files are found.
+    """
+    print("[INFO] Generating default class names...")
+    return {i: f"class_{i}" for i in range(nc)}
+
+
+def write_yaml(save_dir, nc, class_names=None, metadata=None, has_existing_yaml=False):
     """
     Write the dataset configuration YAML file.
+
+    Args:
+        save_dir: Output directory path
+        nc: Number of classes
+        class_names: Dict mapping class indices to names (None to generate defaults)
+        metadata: Additional metadata from original YAML files
+        has_existing_yaml: Whether we found existing YAML files
     """
+    # Determine class names strategy
+    if class_names and has_existing_yaml:
+        print("[INFO] Using class names from existing YAML files")
+        # Use provided class names, fill missing indices with defaults
+        names = {}
+        for i in range(nc):
+            if i in class_names:
+                names[i] = class_names[i]
+            else:
+                names[i] = f"class_{i}"  # Default for missing classes
+                print(f"[INFO] Generated default name for missing class {i}: class_{i}")
+    else:
+        print("[INFO] No existing YAML found, generating default class names")
+        # Generate all default class names
+        names = generate_default_class_names(nc)
+
+    # Build the YAML data structure
     data = {
+        "path": os.path.abspath(save_dir),  # Root directory
+        "train": os.path.join("train", "images"),  # Relative to path
+        "val": os.path.join("valid", "images"),  # Relative to path
+        "nc": nc,
+        "names": names,
+    }
+
+    # Add metadata if available
+    if metadata:
+        if 'description' in metadata:
+            data['description'] = metadata['description']
+        else:
+            data['description'] = 'Merged dataset from multiple YOLO exports'
+    else:
+        data['description'] = 'Merged dataset from multiple YOLO exports'
+
+    # Add creation info
+    data['created_by'] = 'Dataset Merger Script'
+
+    # Write YAML file
+    yaml_path = os.path.join(save_dir, "data.yaml")
+    with open(yaml_path, "w", encoding='utf-8') as f:
+        yaml.safe_dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+    print(f"[✔] Wrote YAML → {yaml_path}")
+
+    # Also write a legacy format for backward compatibility
+    legacy_data = {
         "train": os.path.abspath(os.path.join(save_dir, "train", "images")),
         "val": os.path.abspath(os.path.join(save_dir, "valid", "images")),
         "nc": nc,
-        "names": [str(i) for i in range(nc)],
+        "names": list(names.values()),  # Convert to list format
     }
-    yaml_path = os.path.join(save_dir, "raw_dataset.yaml")
-    with open(yaml_path, "w") as f:
-        yaml.safe_dump(data, f, default_flow_style=False)
-    print(f"[✔] Wrote YAML → {yaml_path}")
+
+    legacy_yaml_path = os.path.join(save_dir, "raw_dataset.yaml")
+    with open(legacy_yaml_path, "w", encoding='utf-8') as f:
+        yaml.safe_dump(legacy_data, f, default_flow_style=False, allow_unicode=True)
+
+    print(f"[✔] Wrote legacy YAML → {legacy_yaml_path}")
 
 
 # ---------------------------------------------------------------------
@@ -176,6 +306,14 @@ def main(args):
 
     print(f"[INFO] Scanning {dataset_root} for all split variants")
     print(f"[INFO] Target train/valid ratio: {train_ratio:.2f}/{1 - train_ratio:.2f}")
+
+    # Try to read existing YAML configurations first
+    class_names, yaml_metadata, has_existing_yaml = find_and_read_yaml_files(dataset_root)
+
+    if has_existing_yaml and class_names:
+        print(f"[INFO] Loaded {len(class_names)} class names from existing YAML files:")
+        for idx, name in sorted(class_names.items()):
+            print(f"  {idx}: {name}")
 
     # Collect all pairs from all possible split directories
     all_pairs = collect_all_pairs(dataset_root)
@@ -196,12 +334,25 @@ def main(args):
         copy_pairs(pairs, split_dir)
         print(f"[INFO] {split_name.capitalize():5}: {len(pairs)} pairs ({len(pairs) / len(all_pairs) * 100:.1f}%)")
 
-    # Calculate number of classes and write YAML config
+    # Calculate number of classes
     nc = max_class_id(all_pairs) + 1
-    write_yaml(out_root, nc)
+
+    # Validate class names coverage if we have existing YAML
+    if has_existing_yaml and class_names:
+        missing_classes = set(range(nc)) - set(class_names.keys())
+        if missing_classes:
+            print(f"[WARNING] Missing class names for IDs: {sorted(missing_classes)}")
+            print("[INFO] Will generate default names for missing classes")
+
+    write_yaml(out_root, nc, class_names, yaml_metadata, has_existing_yaml)
 
     print(f"[✔] Dataset ready at {out_root}")
     print(f"[✔] Total classes detected: {nc}")
+
+    if has_existing_yaml:
+        print(f"[✔] Used existing YAML configurations from source datasets")
+    else:
+        print(f"[✔] Generated default class names (no existing YAML found)")
 
 
 # ---------------------------------------------------------------------
