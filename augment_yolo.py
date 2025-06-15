@@ -1,212 +1,356 @@
-#!/usr/bin/env python3
-"""
-Offline data-augmentation for a YOLOv11 raw_dataset.
-(same description as before)
-"""
-
-import argparse
-import random
-import uuid
-from pathlib import Path
-from typing import Optional  # ← added
-
+import os
 import cv2
 import numpy as np
-import yaml
-from tqdm import tqdm
+import random
+import argparse
+from pathlib import Path
+import shutil
+from typing import List, Tuple
 import albumentations as A
-
-# ─────────────────── mosaic shim ───────────────────
-try:
-    from albumentations.contrib.transforms import Mosaic as _Mosaic
-
-    A.Mosaic = _Mosaic
-except Exception:
-    A.Mosaic = None
-# ───────────────────────────────────────────────────
+from albumentations.core.transforms_interface import ImageOnlyTransform
+from tqdm import tqdm
 
 
-def _clip_boxes(bboxes, eps: float = 1e-6):
-    fixed = []
-    for x, y, w, h in bboxes:
-        x = min(max(x, 0.0), 1.0)
-        y = min(max(y, 0.0), 1.0)
-        w = min(max(w, eps), 1.0)
-        h = min(max(h, eps), 1.0)
-        if w > 0 and h > 0:
-            fixed.append([x, y, w, h])
-    return fixed
+class YOLODataAugmentation:
+    """
+    YOLO data augmentation pipeline that applies various transformations
+    while maintaining proper bounding box coordinates
+    """
 
+    def __init__(self, output_dir: str, augment_count: int = 3):
+        """
+        Initialize the augmentation pipeline
 
-# ---------- augmentation pipelines (unchanged) ----------
-def make_single_bag_aug():
-    return A.Compose(
-        [
-            A.SmallestMaxSize(max_size=900, p=1),
-            A.RandomScale(scale_limit=(-0.4, 0.3), p=0.9),
-            A.Affine(translate_percent=(-0.25, 0.25), rotate=(-15, 15), p=0.9),
-            A.Perspective(scale=(0.05, 0.15), p=0.5),
-            A.OneOf(
-                [
-                    A.RGBShift(15, 15, 15),
-                    A.HueSaturationValue(15, 20, 15),
-                    A.RandomBrightnessContrast(0.2, 0.2),
-                ],
-                p=0.7,
+        Args:
+            output_dir: Directory to save augmented dataset
+            augment_count: Number of augmented versions per original image
+        """
+        self.output_dir = Path(output_dir)
+        self.augment_count = augment_count
+
+        # Create output directory structure
+        self.setup_output_dirs()
+
+        # Define augmentation pipeline with moderate parameters
+        self.transform = A.Compose([
+            # Geometric transformations
+            A.ShiftScaleRotate(
+                shift_limit=0.1,  # 10% shift
+                scale_limit=0.2,  # 20% scale change
+                rotate_limit=15,  # 15 degree rotation
+                border_mode=cv2.BORDER_CONSTANT,
+                value=0,
+                p=0.8
             ),
-            A.GaussNoise((10, 60), p=0.5),
-            A.Resize(480, 640, interpolation=cv2.INTER_AREA),
-        ],
-        bbox_params=A.BboxParams(
-            format="yolo", min_visibility=0.2, label_fields=["class_labels"]
-        ),
-    )
 
+            # Resize with aspect ratio preservation
+            A.LongestMaxSize(max_size=640, p=0.3),
+            A.PadIfNeeded(min_height=640, min_width=640,
+                          border_mode=cv2.BORDER_CONSTANT, value=0, p=0.3),
 
-def make_mosaic_aug():
-    if A.Mosaic is None:
-        return None
-    return A.Compose(
-        [
-            A.Mosaic(
-                scale=(0.85, 1.15),
-                additional_targets={f"image{i}": "image" for i in range(1, 4)},
-                bbox_params=A.BboxParams(
-                    format="yolo",
-                    label_fields=[f"class_labels{i}" for i in range(4)],
-                ),
+            # Color and brightness adjustments
+            A.RandomBrightnessContrast(
+                brightness_limit=0.2,  # 20% brightness change
+                contrast_limit=0.2,  # 20% contrast change
+                p=0.6
             ),
-            A.OneOf([A.MotionBlur(3), A.GaussianBlur(3), A.MedianBlur(3)], p=0.3),
-            A.Resize(480, 640, interpolation=cv2.INTER_AREA),
-        ]
-    )
 
+            A.HueSaturationValue(
+                hue_shift_limit=10,  # Slight hue shift
+                sat_shift_limit=15,  # Slight saturation change
+                val_shift_limit=10,  # Slight value change
+                p=0.5
+            ),
 
-# ---------- helpers (unchanged) ----------
-def load_yolo_label(path):
-    bbs, cids = [], []
-    with open(path) as f:
-        for line in f:
-            toks = line.strip().split()
-            if not toks:
-                continue
-            cls, x, y, w, h = map(float, toks)
-            cids.append(int(cls))
-            bbs.append([x, y, w, h])
-    return bbs, cids
+            # Noise and blur
+            A.GaussNoise(
+                var_limit=(5.0, 15.0),  # Light gaussian noise
+                p=0.3
+            ),
 
+            A.OneOf([
+                A.MotionBlur(blur_limit=3, p=0.3),
+                A.GaussianBlur(blur_limit=3, p=0.3),
+            ], p=0.2),
 
-def save_yolo_label(path, bbs, cids):
-    with open(path, "w") as f:
-        for bb, cid in zip(bbs, cids):
-            f.write(f"{cid} {' '.join(f'{v:.6f}' for v in bb)}\n")
+            # Weather effects (light)
+            A.RandomShadow(
+                shadow_roi=(0, 0.5, 1, 1),
+                num_shadows_lower=1,
+                num_shadows_upper=2,
+                shadow_dimension=5,
+                p=0.2
+            ),
 
+        ], bbox_params=A.BboxParams(
+            format='yolo',
+            label_fields=['class_labels'],
+            min_visibility=0.3  # Keep boxes with at least 30% visibility
+        ))
 
-def random_bg(bg_dir: Path, hw):
-    files = list(bg_dir.glob("*.*"))
-    if not files:
-        return None
-    img = cv2.imread(str(random.choice(files)))
-    return cv2.resize(img, (hw[1], hw[0]), interpolation=cv2.INTER_AREA)
+    def setup_output_dirs(self):
+        """Create output directory structure"""
+        for split in ['train', 'valid']:
+            for subdir in ['images', 'labels']:
+                (self.output_dir / split / subdir).mkdir(parents=True, exist_ok=True)
 
+    def parse_yolo_label(self, label_path: str) -> Tuple[List[int], List[List[float]]]:
+        """
+        Parse YOLO format label file
 
-def paste_on_bg(fg_img, mask, bg_img):
-    if bg_img is None:
-        return fg_img
-    mask3 = np.dstack([mask] * 3).astype(bool)
-    out = bg_img.copy()
-    out[mask3] = fg_img[mask3]
-    return out
+        Args:
+            label_path: Path to label file
 
+        Returns:
+            Tuple of (class_ids, bboxes) where bboxes are in YOLO format [x_center, y_center, width, height]
+        """
+        class_ids = []
+        bboxes = []
 
-def augment_single(img, bbs, cids, aug, bg_dir):
-    res = aug(image=img, bboxes=bbs, class_labels=cids)
-    out_img, out_bbs, out_cls = res["image"], res["bboxes"], res["class_labels"]
-    if bg_dir:
-        mask = (cv2.cvtColor(out_img, cv2.COLOR_BGR2GRAY) > 0).astype("uint8")
-        out_img = paste_on_bg(out_img, mask, random_bg(bg_dir, out_img.shape[:2]))
-    return out_img, _clip_boxes(out_bbs), out_cls
+        if os.path.exists(label_path):
+            with open(label_path, 'r') as f:
+                for line in f.readlines():
+                    line = line.strip()
+                    if line:
+                        parts = line.split()
+                        class_id = int(parts[0])
+                        bbox = [float(x) for x in parts[1:5]]
+                        class_ids.append(class_id)
+                        bboxes.append(bbox)
 
+        return class_ids, bboxes
 
-# ---------- main split loop ----------
-def augment_dataset(
-    split_dir: Path, n_aug: int, bg_dir: Optional[Path]
-):  # ← fixed annotation
-    img_dir, lbl_dir = split_dir / "images", split_dir / "labels"
-    basic_aug = make_single_bag_aug()
-    img_paths = list(img_dir.glob("*.*"))
+    def save_yolo_label(self, label_path: str, class_ids: List[int], bboxes: List[List[float]]):
+        """
+        Save YOLO format label file
 
-    for img_p in tqdm(img_paths, desc=f"{split_dir.name:5} basic", ncols=80):
-        img = cv2.imread(str(img_p))
-        bbs, cids = load_yolo_label(lbl_dir / f"{img_p.stem}.txt")
-        for _ in range(n_aug):
-            new_img, new_bb, new_cls = augment_single(
-                img.copy(), bbs, cids, basic_aug, bg_dir
-            )
-            if not new_bb:
-                continue
-            uid = uuid.uuid4().hex[:8]
-            cv2.imwrite(str(img_dir / f"{img_p.stem}_aug_{uid}.jpg"), new_img)
-            save_yolo_label(lbl_dir / f"{img_p.stem}_aug_{uid}.txt", new_bb, new_cls)
+        Args:
+            label_path: Path to save label file
+            class_ids: List of class IDs
+            bboxes: List of bounding boxes in YOLO format
+        """
+        with open(label_path, 'w') as f:
+            for class_id, bbox in zip(class_ids, bboxes):
+                # Ensure bbox coordinates are within [0, 1] range
+                bbox = [max(0, min(1, coord)) for coord in bbox]
+                f.write(f"{class_id} {bbox[0]:.6f} {bbox[1]:.6f} {bbox[2]:.6f} {bbox[3]:.6f}\n")
 
-    mosaic_aug = make_mosaic_aug()
-    if mosaic_aug is None:
-        return
-    random.shuffle(img_paths)
-    for idx in range(0, len(img_paths), 4):
-        if idx + 3 >= len(img_paths):
-            break
-        imgs, bbs, cls = [], [], []
-        for p in img_paths[idx : idx + 4]:
-            imgs.append(cv2.imread(str(p)))
-            bb, cl = load_yolo_label(lbl_dir / f"{p.stem}.txt")
-            bbs.append(bb)
-            cls.append(cl)
+    def augment_image_and_labels(self, image: np.ndarray, class_ids: List[int],
+                                 bboxes: List[List[float]]) -> Tuple[np.ndarray, List[int], List[List[float]]]:
+        """
+        Apply augmentation to image and corresponding labels
+
+        Args:
+            image: Input image
+            class_ids: List of class IDs
+            bboxes: List of bounding boxes in YOLO format
+
+        Returns:
+            Tuple of (augmented_image, augmented_class_ids, augmented_bboxes)
+        """
+        if len(bboxes) == 0:
+            # If no bounding boxes, apply image-only transformations
+            image_transform = A.Compose([
+                A.ShiftScaleRotate(shift_limit=0.1, scale_limit=0.2, rotate_limit=15, p=0.8),
+                A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.6),
+                A.HueSaturationValue(hue_shift_limit=10, sat_shift_limit=15, val_shift_limit=10, p=0.5),
+                A.GaussNoise(var_limit=(5.0, 15.0), p=0.3),
+            ])
+            transformed = image_transform(image=image)
+            return transformed['image'], class_ids, bboxes
+
         try:
-            res = mosaic_aug(
-                image=imgs[0],
-                bboxes=bbs[0],
-                class_labels=cls[0],
-                **{f"image{i}": imgs[i] for i in range(1, 4)},
-                **{f"bboxes{i}": bbs[i] for i in range(1, 4)},
-                **{f"class_labels{i}": cls[i] for i in range(1, 4)},
+            transformed = self.transform(
+                image=image,
+                bboxes=bboxes,
+                class_labels=class_ids
             )
-        except Exception:
-            continue
-        out_img, out_bb, out_cls = (
-            res["image"],
-            _clip_boxes(res["bboxes"]),
-            res["class_labels"],
+
+            return (
+                transformed['image'],
+                transformed['class_labels'],
+                transformed['bboxes']
+            )
+        except Exception as e:
+            print(f"Augmentation failed: {e}, returning original")
+            return image, class_ids, bboxes
+
+    def get_total_operations(self, input_dir: str) -> int:
+        """
+        Calculate total number of operations for progress tracking
+
+        Args:
+            input_dir: Path to input dataset directory
+
+        Returns:
+            Total number of operations (original copies + augmentations)
+        """
+        input_path = Path(input_dir)
+        total_operations = 0
+
+        for split in ['train', 'valid']:
+            split_path = input_path / split
+            if not split_path.exists():
+                continue
+
+            images_dir = split_path / 'images'
+            if not images_dir.exists():
+                continue
+
+            # Get all image files
+            image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
+            image_files = []
+            for ext in image_extensions:
+                image_files.extend(list(images_dir.glob(f'*{ext}')))
+                image_files.extend(list(images_dir.glob(f'*{ext.upper()}')))
+
+            # Each image: 1 original copy + N augmentations
+            total_operations += len(image_files) * (1 + self.augment_count)
+
+        return total_operations
+
+    def process_dataset(self, input_dir: str):
+        """
+        Process the entire dataset and create augmented versions
+
+        Args:
+            input_dir: Path to input dataset directory
+        """
+        input_path = Path(input_dir)
+
+        # Calculate total operations for progress tracking
+        total_operations = self.get_total_operations(input_dir)
+
+        # Initialize global progress bar
+        with tqdm(total=total_operations, desc="Processing dataset", unit="images") as pbar:
+
+            for split in ['train', 'valid']:
+                split_path = input_path / split
+                if not split_path.exists():
+                    print(f"Warning: {split} directory not found, skipping...")
+                    continue
+
+                images_dir = split_path / 'images'
+                labels_dir = split_path / 'labels'
+
+                if not images_dir.exists():
+                    print(f"Warning: {images_dir} not found, skipping {split}...")
+                    continue
+
+                # Get all image files
+                image_extensions = ['.jpg', '.jpeg', '.png', '.bmp', '.tiff']
+                image_files = []
+                for ext in image_extensions:
+                    image_files.extend(list(images_dir.glob(f'*{ext}')))
+                    image_files.extend(list(images_dir.glob(f'*{ext.upper()}')))
+
+                print(f"\nProcessing {len(image_files)} images in {split} split...")
+
+                # Process each image with detailed progress
+                for img_path in image_files:
+                    # Update progress bar description with current file
+                    pbar.set_description(f"Processing {split}: {img_path.name}")
+
+                    # Copy original image and label
+                    self.copy_original(img_path, labels_dir, split)
+                    pbar.update(1)  # Update progress for original copy
+
+                    # Create augmented versions
+                    for aug_idx in range(self.augment_count):
+                        pbar.set_description(
+                            f"Augmenting {split}: {img_path.name} ({aug_idx + 1}/{self.augment_count})")
+                        self.create_augmented_version(img_path, labels_dir, split, aug_idx)
+                        pbar.update(1)  # Update progress for each augmentation
+
+                # Update description after completing each split
+                pbar.set_description(f"Completed {split} split")
+
+    def copy_original(self, img_path: Path, labels_dir: Path, split: str):
+        """Copy original image and label to output directory"""
+        # Copy image
+        output_img_path = self.output_dir / split / 'images' / img_path.name
+        shutil.copy2(img_path, output_img_path)
+
+        # Copy label if exists
+        label_path = labels_dir / f"{img_path.stem}.txt"
+        output_label_path = self.output_dir / split / 'labels' / f"{img_path.stem}.txt"
+
+        if label_path.exists():
+            shutil.copy2(label_path, output_label_path)
+        else:
+            # Create empty label file
+            output_label_path.touch()
+
+    def create_augmented_version(self, img_path: Path, labels_dir: Path, split: str, aug_idx: int):
+        """Create one augmented version of the image and label"""
+        # Load image
+        image = cv2.imread(str(img_path))
+        if image is None:
+            print(f"Warning: Could not load image {img_path}")
+            return
+
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+
+        # Load labels
+        label_path = labels_dir / f"{img_path.stem}.txt"
+        class_ids, bboxes = self.parse_yolo_label(str(label_path))
+
+        # Apply augmentation
+        aug_image, aug_class_ids, aug_bboxes = self.augment_image_and_labels(
+            image, class_ids, bboxes
         )
-        if not out_bb:
-            continue
-        uid = uuid.uuid4().hex[:8]
-        cv2.imwrite(str(img_dir / f"mosaic_{uid}.jpg"), out_img)
-        save_yolo_label(lbl_dir / f"mosaic_{uid}.txt", out_bb, out_cls)
+
+        # Save augmented image
+        aug_image_bgr = cv2.cvtColor(aug_image, cv2.COLOR_RGB2BGR)
+        aug_img_name = f"{img_path.stem}_aug_{aug_idx}{img_path.suffix}"
+        output_img_path = self.output_dir / split / 'images' / aug_img_name
+        cv2.imwrite(str(output_img_path), aug_image_bgr)
+
+        # Save augmented labels
+        aug_label_name = f"{img_path.stem}_aug_{aug_idx}.txt"
+        output_label_path = self.output_dir / split / 'labels' / aug_label_name
+        self.save_yolo_label(str(output_label_path), aug_class_ids, aug_bboxes)
 
 
-# ---------- CLI ----------
 def main():
-    ap = argparse.ArgumentParser(
-        description="Albumentations offline augmentation for YOLOv11"
-    )
-    ap.add_argument("dataset_dir", help="processed_dataset root")
-    ap.add_argument("--n_aug", type=int, default=3, help="copies per original image")
-    ap.add_argument(
-        "--bg_dir", type=str, default=None, help="backgrounds folder (optional)"
-    )
-    args = ap.parse_args()
+    """Main function to run the augmentation pipeline"""
+    parser = argparse.ArgumentParser(description='YOLO Dataset Augmentation Pipeline')
+    parser.add_argument('--input_dir', type=str, required=True,
+                        help='Path to input dataset directory (containing train and valid folders)')
+    parser.add_argument('--output_dir', type=str, required=True,
+                        help='Path to output augmented dataset directory')
+    parser.add_argument('--augment_count', type=int, default=3,
+                        help='Number of augmented versions per original image (default: 3)')
 
-    ds_root = Path(args.dataset_dir).expanduser().resolve()
-    if not (ds_root / "train").exists():
-        raise FileNotFoundError("train/ folder not found under dataset_dir")
+    args = parser.parse_args()
 
-    bg_dir = Path(args.bg_dir).expanduser().resolve() if args.bg_dir else None
-    for split in ["train", "valid"]:
-        augment_dataset(ds_root / split, args.n_aug, bg_dir)
+    # Validate input directory
+    input_path = Path(args.input_dir)
+    if not input_path.exists():
+        print(f"Error: Input directory {args.input_dir} does not exist!")
+        return
 
-    print(f"✔  Augmentation complete – new images live under {ds_root}")
+    print(f"Input directory: {args.input_dir}")
+    print(f"Output directory: {args.output_dir}")
+    print(f"Augmentations per image: {args.augment_count}")
+    print("-" * 50)
+
+    # Initialize and run augmentation
+    augmenter = YOLODataAugmentation(args.output_dir, args.augment_count)
+
+    # Calculate and display total expected files
+    total_ops = augmenter.get_total_operations(args.input_dir)
+    print(f"Total operations to perform: {total_ops}")
+    print("Starting augmentation process...\n")
+
+    augmenter.process_dataset(args.input_dir)
+
+    print("\nAugmentation completed successfully!")
+    print(f"Augmented dataset saved to: {args.output_dir}")
 
 
 if __name__ == "__main__":
     main()
+
+# Usage example:
+# python augment_yolo.py --input_dir ./dataset/merged_dataset --output_dir ./dataset/augmented_dataset --augment_count 20
