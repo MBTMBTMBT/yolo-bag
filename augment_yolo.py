@@ -35,59 +35,114 @@ class YOLODataAugmentation:
         # Create output directory structure
         self.setup_output_dirs()
 
-        # Define augmentation pipeline with moderate parameters
+        # Define augmentation pipeline with enhanced parameters for better small object detection
         self.transform = A.Compose([
-            # Geometric transformations
+            # Geometric transformations with increased distortion
             A.ShiftScaleRotate(
-                shift_limit=0.1,  # 10% shift
-                scale_limit=0.2,  # 20% scale change
-                rotate_limit=15,  # 15 degree rotation
+                shift_limit=0.15,  # 15% shift (increased from 10%)
+                scale_limit=0.50,  # 50% scale change (increased from 20%)
+                rotate_limit=25,  # 25 degree rotation (increased from 15)
                 border_mode=cv2.BORDER_CONSTANT,
                 value=0,
-                p=0.8
+                p=0.9  # Increased probability to 90%
+            ),
+
+            # Random perspective distortion to simulate different viewing angles
+            A.Perspective(
+                scale=(0.05, 0.1),  # Add perspective transformation
+                p=0.3
             ),
 
             # Force resize to exact 480x640 resolution
             A.Resize(height=480, width=640, p=1.0),  # Always resize to exact dimensions
 
-            # Color and brightness adjustments
-            A.RandomBrightnessContrast(
-                brightness_limit=0.2,  # 20% brightness change
-                contrast_limit=0.2,  # 20% contrast change
-                p=0.6
-            ),
-
-            A.HueSaturationValue(
-                hue_shift_limit=10,  # Slight hue shift
-                sat_shift_limit=15,  # Slight saturation change
-                val_shift_limit=10,  # Slight value change
-                p=0.5
-            ),
-
-            # Noise and blur
-            A.GaussNoise(
-                var_limit=(5.0, 15.0),  # Light gaussian noise
+            # Random crops to simulate objects at different distances
+            A.RandomSizedBBoxSafeCrop(
+                height=480,
+                width=640,
+                erosion_rate=0.2,  # Helps maintain small objects
                 p=0.3
             ),
 
-            A.OneOf([
-                A.MotionBlur(blur_limit=3, p=0.3),
-                A.GaussianBlur(blur_limit=3, p=0.3),
-            ], p=0.2),
+            # Apply zoom-out effect to simulate faraway objects
+            # This will make the bag appear smaller in some augmentations
+            A.RandomScale(
+                scale_limit=(-0.3, 0),  # Scale down by up to 30%
+                p=0.4
+            ),
 
-            # Weather effects (light)
+            # Pad to maintain dimensions
+            A.PadIfNeeded(
+                min_height=480,
+                min_width=640,
+                border_mode=cv2.BORDER_CONSTANT,
+                value=0,
+                p=1.0
+            ),
+
+            # Enhanced color and brightness adjustments
+            A.RandomBrightnessContrast(
+                brightness_limit=0.35,  # 35% brightness change (increased from 20%)
+                contrast_limit=0.35,  # 35% contrast change (increased from 20%)
+                p=0.7  # Increased probability
+            ),
+
+            A.HueSaturationValue(
+                hue_shift_limit=20,  # Stronger hue shift (increased from 10)
+                sat_shift_limit=30,  # Stronger saturation change (increased from 15)
+                val_shift_limit=20,  # Stronger value change (increased from 10)
+                p=0.6  # Increased probability
+            ),
+
+            # Simulate different lighting conditions
+            A.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.1,
+                p=0.3
+            ),
+
+            # Increased noise and blur effects
+            A.GaussNoise(
+                var_limit=(10.0, 40.0),  # Stronger noise (increased from 5.0-15.0)
+                p=0.4  # Increased probability
+            ),
+
+            A.OneOf([
+                A.MotionBlur(blur_limit=5, p=0.4),  # Increased blur limit
+                A.GaussianBlur(blur_limit=5, p=0.4),  # Increased blur limit
+                A.MedianBlur(blur_limit=5, p=0.2),  # Added median blur
+            ], p=0.3),  # Increased overall blur probability
+
+            # Enhanced weather effects
             A.RandomShadow(
                 shadow_roi=(0, 0.5, 1, 1),
                 num_shadows_lower=1,
-                num_shadows_upper=2,
-                shadow_dimension=5,
+                num_shadows_upper=3,  # More shadows possible
+                shadow_dimension=7,  # Larger shadow dimension
+                p=0.3  # Increased probability
+            ),
+
+            # Add occasional fog/haze to simulate distance
+            A.RandomFog(
+                fog_coef_lower=0.1,
+                fog_coef_upper=0.3,
+                alpha_coef=0.1,
                 p=0.2
+            ),
+
+            # Occasionally reduce image quality to simulate poor conditions
+            A.ImageCompression(
+                quality_lower=70,
+                quality_upper=99,
+                p=0.3
             ),
 
         ], bbox_params=A.BboxParams(
             format='yolo',
             label_fields=['class_labels'],
-            min_visibility=0.3  # Keep boxes with at least 30% visibility
+            min_visibility=0.2  # Reduced from 0.3 to keep more partially visible boxes
         ))
 
     def find_and_read_yaml_file(self, input_dir: str) -> bool:
