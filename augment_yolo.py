@@ -40,7 +40,7 @@ class YOLODataAugmentation:
             # Geometric transformations with increased distortion
             A.ShiftScaleRotate(
                 shift_limit=0.15,  # 15% shift (increased from 10%)
-                scale_limit=0.50,  # 50% scale change (increased from 20%)
+                scale_limit=(-0.50, 0.0),  # 50% scale change (increased from 20%)
                 rotate_limit=25,  # 25 degree rotation (increased from 15)
                 border_mode=cv2.BORDER_CONSTANT,
                 value=0,
@@ -362,9 +362,10 @@ class YOLODataAugmentation:
         """
         with open(label_path, 'w') as f:
             for class_id, bbox in zip(class_ids, bboxes):
+                class_id_int = int(class_id)
                 # Ensure bbox coordinates are within [0, 1] range
                 bbox = [max(0, min(1, coord)) for coord in bbox]
-                f.write(f"{class_id} {bbox[0]:.6f} {bbox[1]:.6f} {bbox[2]:.6f} {bbox[3]:.6f}\n")
+                f.write(f"{class_id_int} {bbox[0]:.6f} {bbox[1]:.6f} {bbox[2]:.6f} {bbox[3]:.6f}\n")
 
     def augment_image_and_labels(self, image: np.ndarray, class_ids: List[int],
                                  bboxes: List[List[float]]) -> Tuple[np.ndarray, List[int], List[List[float]]]:
@@ -397,9 +398,11 @@ class YOLODataAugmentation:
                 class_labels=class_ids
             )
 
+            int_labels = [int(c) for c in transformed['class_labels']]
+
             return (
                 transformed['image'],
-                transformed['class_labels'],
+                int_labels,
                 transformed['bboxes']
             )
         except Exception as e:

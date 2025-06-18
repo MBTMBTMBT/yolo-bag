@@ -19,10 +19,7 @@ class UltralyticsWebcamTester:
         print("Controls:")
         print("- Press 'q' to quit")
         print("- Press 's' to save current frame")
-        print("- Press 'c' to toggle confidence threshold (0.3/0.5/0.7)")
 
-        thresholds = [0.3, 0.5, 0.7]
-        threshold_idx = thresholds.index(self.conf_threshold)
         frame_count = 0
         fps_counter = time.time()
 
@@ -62,10 +59,6 @@ class UltralyticsWebcamTester:
                 filename = f"yolo_detection_{int(time.time())}.jpg"
                 cv2.imwrite(filename, frame)
                 print(f"Saved frame as {filename}")
-            elif key == ord('c'):
-                threshold_idx = (threshold_idx + 1) % len(thresholds)
-                self.conf_threshold = thresholds[threshold_idx]
-                print(f"Changed confidence threshold to: {self.conf_threshold}")
 
         cap.release()
         cv2.destroyAllWindows()
